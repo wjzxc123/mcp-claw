@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>MCP Claw</title>
+</head>
+<body>
+  <div id="root"></div>
+  <!-- Browser-only mock: provides a fallback mcpGateway API when running outside Electron -->
+  <script>
+    if (!window.mcpGateway) {
+      const mockAgents = [
+        { id: 'agent-1', name: 'Claude Code', token: 'cc_demo123abc' },
+        { id: 'agent-2', name: 'Codex', token: 'cx_demo456def' },
+      ];
+      const mockServers = [
+        { id: '1', name: 'filesystem', description: '本地文件系统操作', transport: 'stdio', enabled: true, autoStart: true, exposedTo: ['agent-1'], status: 'READY', retryCount: 0, configLabel: 'npx -y @anthropic/mcp-server-filesystem' },
+        { id: '2', name: 'github', description: 'GitHub 仓库管理', transport: 'stdio', enabled: true, autoStart: false, exposedTo: [], status: 'READY', retryCount: 0, configLabel: 'npx -y @anthropic/mcp-server-github' },
+        { id: '3', name: 'postgres', description: '', transport: 'streamable-http', enabled: false, autoStart: true, exposedTo: [], status: 'READY', retryCount: 0, configLabel: 'http://localhost:3000/mcp' },
+        { id: '4', name: 'web-search', description: '网页搜索服务', transport: 'stdio', enabled: true, autoStart: true, exposedTo: ['agent-1', 'agent-2'], status: 'ERROR', error: 'connection refused', retryCount: 2, configLabel: 'npx -y @anthropic/mcp-server-web-search' },
+      ];
+      const listeners = [];
+      window.mcpGateway = {
+        getServers: async () => mockServers.map(s => ({...s})),
+        toggleServer: async (id, enabled) => {
+          const s = mockServers.find(s => s.id === id);
+          if (s) { s.enabled = enabled; return { success: true }; }
+          return { error: 'not found' };
+        },
+        addServer: async (config) => {
+          const s = { id: String(Date.now()), ...config, exposedTo: [], status: 'CONNECTING', retryCount: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+          mockServers.push(s);
+          return { success: true, server: s };
+        },
+        updateServer: async (id, input) => {
+          const idx = mockServers.findIndex(s => s.id === id);
+          if (idx === -1) return { error: 'not found' };
+          mockServers[idx] = { ...mockServers[idx], ...input, updatedAt: new Date().toISOString() };
+          return { success: true, server: mockServers[idx] };
+        },
+        deleteServer: async (id) => {
+          const idx = mockServers.findIndex(s => s.id === id);
+          if (idx !== -1) { mockServers.splice(idx, 1); return { success: true }; }
+          return { error: 'not found' };
+        },
+        reconnectServer: async (id) => {
+          const s = mockServers.find(s => s.id === id);
+          if (s) { s.status = 'CONNECTING'; setTimeout(() => { s.status = 'READY'; listeners.forEach(fn => fn({...s})); }, 1000); return { success: true }; }
+          return { error: 'not found' };
+        },
+        testServer: async (id) => {
+          const startedAt = Date.now();
+          const s = mockServers.find(s => s.id === id);
+          if (!s) return { ok: false, status: 'ERROR', toolCount: 0, durationMs: 0, error: 'not found' };
+          if (!s.enabled) return { ok: false, status: s.status, toolCount: 0, durationMs: Date.now() - startedAt, error: 'Server is disabled' };
+          if (s.status !== 'READY') return { ok: false, status: s.status, toolCount: 0, durationMs: Date.now() - startedAt, error: s.error || `Server is not ready (status: ${s.status})` };
+          return { ok: true, status: 'READY', toolCount: 2, durationMs: Date.now() - startedAt };
+        },
+        getEndpointInfo: async () => ({ url: 'http://localhost:18721/mcp', port: 18721, agents: [...mockAgents] }),
+        setExposedTo: async (id, agentIds) => {
+          const s = mockServers.find(s => s.id === id);
+          if (s) { s.exposedTo = agentIds; return { success: true }; }
+          return { error: 'not found' };
+        },
+        setAutoStart: async (id, autoStart) => {
+          const s = mockServers.find(s => s.id === id);
+          if (s) { s.autoStart = autoStart; return { success: true }; }
+          return { error: 'not found' };
+        },
+        getServerLog: async (name) => {
+          return { content: `[2026-05-20 10:00:00] MCP server "${name}" started\n[2026-05-20 10:00:01] Connected successfully\n[2026-05-20 10:00:02] Ready to serve\n`, error: null };
+        },
+        clearServerLog: async () => ({ success: true }),
+        getServerTools: async (id) => {
+          const s = mockServers.find(s => s.id === id);
+          if (!s) return { tools: [], error: 'not found' };
+          return { tools: [
+            { name: `${s.name}_tool_1`, description: 'Example tool 1 - does something useful', inputSchema: { type: 'object', properties: {} } },
+            { name: `${s.name}_tool_2`, description: 'Example tool 2 - another capability', inputSchema: { type: 'object', properties: {} } },
+          ] };
+        },
+        getAgents: async () => [...mockAgents],
+        addAgent: async (name) => {
+          const agent = { id: 'agent-' + String(Date.now()), name, token: 'tk_' + Math.random().toString(16).slice(2, 18) };
+          mockAgents.push(agent);
+          return { agent };
+        },
+        removeAgent: async (id) => {
+          const idx = mockAgents.findIndex(a => a.id === id);
+          if (idx !== -1) { mockAgents.splice(idx, 1); return { success: true }; }
+          return { error: 'not found' };
+        },
+        updateAgentName: async (id, name) => {
+          const a = mockAgents.find(a => a.id === id);
+          if (a) { a.name = name; return { agent: a }; }
+          return { error: 'not found' };
+        },
+        updateAgentToken: async (id, token) => {
+          const a = mockAgents.find(a => a.id === id);
+          if (a) { a.token = token; return { agent: a }; }
+          return { error: 'not found' };
+        },
+        getAccessLogs: async () => [
+          { timestamp: new Date(Date.now() - 60000).toISOString(), agentName: 'Claude Code', agentId: 'agent-1', action: 'tools/list', detail: '返回 2 个工具' },
+          { timestamp: new Date(Date.now() - 30000).toISOString(), agentName: 'Claude Code', agentId: 'agent-1', action: 'tools/call', detail: '成功 — filesystem__read_file' },
+          { timestamp: new Date(Date.now() - 10000).toISOString(), agentName: null, agentId: null, action: 'tools/list', detail: '拒绝 — 未提供有效令牌' },
+        ],
+        onAccessLog: (fn) => { const h = (e) => fn(e); return () => {}; },
+        onStateChanged: (fn) => { listeners.push(fn); return () => { const i = listeners.indexOf(fn); if (i !== -1) listeners.splice(i, 1); }; },
+      };
+    }
+  </script>
+  <script type="module" src="./index.tsx"></script>
+</body>
+</html>
