@@ -257,5 +257,4 @@ npm run package      # 构建并打包桌面应用
 - token 会展示在应用配置面板中，请不要把真实 token 提交到公开仓库
 
 ## License
-
 当前仓库尚未声明 License。发布到 GitHub 前建议根据你的发布策略补充 `LICENSE` 文件。
