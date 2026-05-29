@@ -16,6 +16,97 @@ import {
   HttpConfig,
 } from './types';
 
+const crossSpawn = require('cross-spawn') as typeof spawn;
+
+function getEnvValue(env: Record<string, string>, key: string): string | undefined {
+  const found = Object.keys(env).find(k => k.toLowerCase() === key.toLowerCase());
+  return found ? env[found] : undefined;
+}
+
+function mergeWindowsPath(env: Record<string, string>): Record<string, string> {
+  if (process.platform !== 'win32') return env;
+
+  const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') || 'Path';
+  const parts = new Set<string>();
+  const addPath = (value?: string) => {
+    for (const item of (value || '').split(path.delimiter)) {
+      const trimmed = item.trim();
+      if (trimmed) parts.add(trimmed);
+    }
+  };
+
+  addPath(env[pathKey]);
+
+  try {
+    addPath(execSync('reg query "HKCU\\Environment" /v Path', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).split(/\s+REG_\w+\s+/)[1]);
+  } catch {}
+
+  try {
+    addPath(execSync('reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment" /v Path', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).split(/\s+REG_\w+\s+/)[1]);
+  } catch {}
+
+  env[pathKey] = Array.from(parts).join(path.delimiter);
+  return env;
+}
+
+export function resolveCommand(command: string, env: Record<string, string> = process.env as Record<string, string>): string {
+  if (path.isAbsolute(command) || command.includes('/') || command.includes('\\')) {
+    return command;
+  }
+
+  const pathValue = getEnvValue(env, 'Path') || '';
+  const pathExt = process.platform === 'win32'
+    ? (getEnvValue(env, 'PATHEXT') || '.COM;.EXE;.BAT;.CMD')
+    : '';
+  const extensions = process.platform === 'win32' && !path.extname(command)
+    ? pathExt.split(';').filter(Boolean)
+    : [''];
+
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of extensions) {
+      const candidate = path.join(dir, `${command}${ext.toLowerCase()}`);
+      if (fs.existsSync(candidate)) return candidate;
+      const upperCandidate = path.join(dir, `${command}${ext.toUpperCase()}`);
+      if (fs.existsSync(upperCandidate)) return upperCandidate;
+    }
+  }
+
+  return command;
+}
+
+function quoteCmdArg(value: string): string {
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+export function createSpawnSpec(command: string, args: string[]): { command: string; args: string[]; displayCommand: string; shell: boolean } {
+  if (process.platform !== 'win32') {
+    return {
+      command,
+      args,
+      displayCommand: [command, ...args].join(' '),
+      shell: false,
+    };
+  }
+
+  const ext = path.extname(command).toLowerCase();
+  if (ext !== '.cmd' && ext !== '.bat') {
+    return {
+      command,
+      args,
+      displayCommand: [command, ...args].join(' '),
+      shell: false,
+    };
+  }
+
+  return {
+    command,
+    args,
+    displayCommand: [quoteCmdArg(command), ...args.map(quoteCmdArg)].join(' '),
+    shell: false,
+  };
+}
+
 export interface ChildManagerEvents {
   'state-changed': (state: ServerState) => void;
   'tools-updated': (serverId: string, tools: MCPTool[]) => void;
@@ -33,6 +124,7 @@ export class ChildManager extends EventEmitter {
   private childProcess: ChildProcess | null = null;
   private isCleaningUp: boolean = false;
   private logPath: string;
+  private cachedTools: MCPTool[] = [];
 
   constructor(config: ServerConfig, logPath: string) {
     super();
@@ -145,22 +237,28 @@ export class ChildManager extends EventEmitter {
 
   private async connectStdio(): Promise<void> {
     const { command, args, env, cwd } = this.config.config as StdioConfig;
-    const cmdLine = [command, ...(args || [])].join(' ');
-
-    this.log(`Starting: ${cmdLine}`);
 
     const childEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries({ ...process.env, ...env })) {
       if (v !== undefined) childEnv[k] = v;
     }
+    mergeWindowsPath(childEnv);
+
+    const resolvedCommand = resolveCommand(command, childEnv);
+    const spawnSpec = createSpawnSpec(resolvedCommand, args || []);
+
+    this.log(`Starting: ${spawnSpec.displayCommand}`);
+    if (resolvedCommand !== command) {
+      this.log(`Resolved command "${command}" -> "${resolvedCommand}"`);
+    }
 
     // 1. Spawn the child process ourselves so we can capture stdout/stderr
     //    BEFORE the MCP transport starts consuming stdout for JSON-RPC.
-    const proc = spawn(command, args || [], {
+    const proc = crossSpawn(spawnSpec.command, spawnSpec.args, {
       env: childEnv,
       cwd: cwd || undefined,
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: false,
+      shell: spawnSpec.shell,
       windowsHide: true,
     });
     this.childProcess = proc;
@@ -193,7 +291,7 @@ export class ChildManager extends EventEmitter {
 
     // 4. Create StdioClientTransport but inject our pre-spawned process
     const stdioTransport = new StdioClientTransport({
-      command,
+      command: resolvedCommand,
       args,
       env: childEnv,
       cwd: cwd || undefined,
@@ -263,7 +361,8 @@ export class ChildManager extends EventEmitter {
 
     try {
       const result = await this.client.listTools();
-      this.emit('tools-updated', this.config.id, result.tools as MCPTool[]);
+      this.cachedTools = result.tools as MCPTool[];
+      this.emit('tools-updated', this.config.id, this.getCachedTools());
     } catch {
       this.handleError(new Error('tools/list failed after connection'));
     }
@@ -419,10 +518,16 @@ export class ChildManager extends EventEmitter {
     }
     try {
       const result = await this.client.listTools();
-      return result.tools as MCPTool[];
+      this.cachedTools = result.tools as MCPTool[];
+      this.emit('tools-updated', this.config.id, this.getCachedTools());
+      return this.getCachedTools();
     } catch {
       return [];
     }
+  }
+
+  getCachedTools(): MCPTool[] {
+    return this.cachedTools.map(tool => ({ ...tool }));
   }
 
   async callTool(name: string, args: Record<string, unknown>): Promise<{ content: Array<{ type: string; text?: string }> }> {

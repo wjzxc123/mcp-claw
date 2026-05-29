@@ -23,7 +23,7 @@ const GATEWAY_TOOLS: MCPTool[] = [
   {
     name: prefixToolName(GATEWAY_SERVER_NAME, 'list_tools'),
     title: 'List Managed MCP Tools',
-    description: 'List tools currently available to the authenticated agent through MCP Claw, grouped by managed server.',
+    description: 'List tools currently available to the authenticated agent through MCP Claw, grouped by managed MCP service. Use this when the user names an MCP service and you need to find tools from that service.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -32,6 +32,31 @@ const GATEWAY_TOOLS: MCPTool[] = [
           description: 'Optional managed server name to filter by.',
         },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: prefixToolName(GATEWAY_SERVER_NAME, 'call_tool'),
+    title: 'Call Tool By Managed MCP Service',
+    description: 'Call a tool by MCP service name and original tool name. Use this after listing or searching tools when the user refers to a managed MCP service instead of a namespaced tool name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        server: {
+          type: 'string',
+          description: 'Managed MCP service name, for example "github" or "filesystem".',
+        },
+        tool: {
+          type: 'string',
+          description: 'Original tool name inside that MCP service, without the MCP Claw service prefix.',
+        },
+        arguments: {
+          type: 'object',
+          description: 'Arguments to pass to the downstream MCP tool.',
+          additionalProperties: true,
+        },
+      },
+      required: ['server', 'tool'],
       additionalProperties: false,
     },
   },
@@ -155,11 +180,10 @@ export class ProxyServer {
       this.invalidateCache();
     });
 
-    if (cm.getState().status === 'READY') {
-      cm.getTools().then(tools => {
-        this.toolRouter.setServerTools(cm.getId(), cm.getName(), tools);
-        this.invalidateCache();
-      });
+    const cachedTools = cm.getCachedTools();
+    if (cachedTools.length > 0) {
+      this.toolRouter.setServerTools(cm.getId(), cm.getName(), cachedTools);
+      this.invalidateCache();
     }
   }
 
@@ -210,17 +234,37 @@ export class ProxyServer {
     return visible;
   }
 
-  private async getGatewayToolRows(agentId: string, serverFilter?: string): Promise<Array<{
+  private getGatewayToolRows(agentId: string, serverFilter?: string): Array<{
     server: string;
     tool: string;
     exposedName: string;
+    title?: string;
+    callViaGateway: {
+      tool: string;
+      arguments: {
+        server: string;
+        tool: string;
+        arguments: Record<string, unknown>;
+      };
+    };
     description: string;
-  }>> {
+    inputSchema: Record<string, unknown>;
+  }> {
     const rows: Array<{
       server: string;
       tool: string;
       exposedName: string;
+      title?: string;
+      callViaGateway: {
+        tool: string;
+        arguments: {
+          server: string;
+          tool: string;
+          arguments: Record<string, unknown>;
+        };
+      };
       description: string;
+      inputSchema: Record<string, unknown>;
     }> = [];
     const filter = serverFilter?.trim();
 
@@ -228,13 +272,23 @@ export class ProxyServer {
       const serverName = cm.getName();
       if (filter && serverName !== filter) continue;
 
-      const tools = await cm.getTools();
+      const tools = cm.getCachedTools();
       for (const tool of tools) {
         rows.push({
           server: serverName,
           tool: tool.name,
           exposedName: prefixToolName(serverName, tool.name),
+          title: tool.title,
+          callViaGateway: {
+            tool: prefixToolName(GATEWAY_SERVER_NAME, 'call_tool'),
+            arguments: {
+              server: serverName,
+              tool: tool.name,
+              arguments: {},
+            },
+          },
           description: tool.description || '',
+          inputSchema: tool.inputSchema,
         });
       }
     }
@@ -256,7 +310,7 @@ export class ProxyServer {
         const servers = await Promise.all(Array.from(this.childManagers.values()).map(async (cm) => {
           const state = cm.getState();
           const visible = this.shouldExposeServer(cm, agentId);
-          const tools = visible ? await cm.getTools() : [];
+          const tools = visible ? cm.getCachedTools() : [];
           return {
             id: cm.getId(),
             name: cm.getName(),
@@ -285,8 +339,40 @@ export class ProxyServer {
         return this.textResult({
           gateway: GATEWAY_SERVER_NAME,
           agent: this.getAgentLabel(agentId),
-          tools: await this.getGatewayToolRows(agentId, server),
+          usage: 'When a user names an MCP service, choose a row for that service and call either exposedName directly or mcp_claw__call_tool with { server, tool, arguments }.',
+          tools: this.getGatewayToolRows(agentId, server),
         });
+      }
+
+      case 'call_tool': {
+        const serverName = typeof args.server === 'string' ? args.server.trim() : '';
+        const toolName = typeof args.tool === 'string' ? args.tool.trim() : '';
+        const toolArgs = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
+          ? args.arguments as Record<string, unknown>
+          : {};
+
+        if (!serverName) {
+          throw new Error('Argument "server" is required.');
+        }
+        if (!toolName) {
+          throw new Error('Argument "tool" is required.');
+        }
+
+        const cm = this.findChildByName(serverName, agentId);
+        if (!cm) {
+          throw new Error(`Unknown or hidden managed MCP server "${serverName}".`);
+        }
+        if (cm.getState().status !== 'READY') {
+          throw new Error(`Server "${serverName}" is not ready (status: ${cm.getState().status}).`);
+        }
+
+        const tools = cm.getCachedTools();
+        if (!tools.some(tool => tool.name === toolName)) {
+          const available = tools.map(tool => tool.name).join(', ') || '(none)';
+          throw new Error(`Unknown tool "${toolName}" on MCP server "${serverName}". Available tools: ${available}`);
+        }
+
+        return cm.callTool(toolName, toolArgs);
       }
 
       case 'get_server_status': {
@@ -314,7 +400,7 @@ export class ProxyServer {
           error: state.error || null,
           exposedToCurrentAgent: state.exposedTo.includes(agentId),
           visibleToCurrentAgent: visible,
-          tools: visible ? await this.getGatewayToolRows(agentId, serverName) : [],
+          tools: visible ? this.getGatewayToolRows(agentId, serverName) : [],
         });
       }
 
@@ -338,7 +424,7 @@ export class ProxyServer {
             status: state.status,
           }));
 
-        const tools = (await this.getGatewayToolRows(agentId)).filter(tool =>
+        const tools = this.getGatewayToolRows(agentId).filter(tool =>
           tool.server.toLowerCase().includes(query) ||
           tool.tool.toLowerCase().includes(query) ||
           tool.exposedName.toLowerCase().includes(query) ||

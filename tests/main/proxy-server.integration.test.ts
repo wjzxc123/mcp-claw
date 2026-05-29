@@ -34,6 +34,7 @@ class MockChildManager extends EventEmitter {
   getName() { return this.name; }
   getState() { return { ...this.state }; }
   async getTools() { return this.tools; }
+  getCachedTools() { return this.tools; }
 
   async callTool(name: string) {
     return { content: [{ type: 'text', text: `called ${name}` }] };
@@ -87,6 +88,7 @@ describe('ProxyServer MCP integration', () => {
       const names = result.tools.map(tool => tool.name).sort();
 
       expect(names).toContain('mcp_claw__list_tools');
+      expect(names).toContain('mcp_claw__call_tool');
       expect(names).toContain('github__create_issue');
 
       const gatewayResult = await client.callTool({
@@ -94,6 +96,16 @@ describe('ProxyServer MCP integration', () => {
         arguments: {},
       });
       expect((gatewayResult.content as any[])[0].text).toContain('github__create_issue');
+
+      const gatewayCallResult = await client.callTool({
+        name: 'mcp_claw__call_tool',
+        arguments: {
+          server: 'github',
+          tool: 'create_issue',
+          arguments: { title: 'Test issue' },
+        },
+      });
+      expect((gatewayCallResult.content as any[])[0].text).toBe('called create_issue');
 
       const downstreamResult = await client.callTool({
         name: 'github__create_issue',

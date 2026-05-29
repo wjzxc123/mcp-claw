@@ -36,6 +36,12 @@ export function parseToolName(namespacedName: string): { serverName: string; too
   return { serverName, toolName };
 }
 
+function describeAggregatedTool(serverName: string, tool: MCPTool): string {
+  const ownership = `MCP service "${serverName}", original tool "${tool.name}".`;
+  const originalDescription = (tool.description || '').trim();
+  return originalDescription ? `${ownership} ${originalDescription}` : ownership;
+}
+
 /**
  * Aggregate tools from multiple servers, prefixing each tool with server name.
  */
@@ -44,9 +50,30 @@ export function aggregateTools(servers: ToolsByServer[]): MCPTool[] {
 
   for (const server of servers) {
     for (const tool of server.tools) {
+      const exposedName = prefixToolName(server.serverName, tool.name);
       result.push({
         ...tool,
-        name: prefixToolName(server.serverName, tool.name),
+        name: exposedName,
+        title: tool.title ? `${server.serverName} / ${tool.title}` : `${server.serverName} / ${tool.name}`,
+        description: describeAggregatedTool(server.serverName, tool),
+        annotations: {
+          ...(tool.annotations || {}),
+          mcpClaw: {
+            serverId: server.serverId,
+            serverName: server.serverName,
+            originalName: tool.name,
+            exposedName,
+          },
+        },
+        execution: {
+          ...(tool.execution || {}),
+          mcpClaw: {
+            serverId: server.serverId,
+            serverName: server.serverName,
+            originalName: tool.name,
+            exposedName,
+          },
+        },
       });
     }
   }

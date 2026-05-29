@@ -25,10 +25,11 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   })),
 }));
 
-import { ChildManager } from '../../src/main/child-manager';
+import { ChildManager, createSpawnSpec, resolveCommand } from '../../src/main/child-manager';
 import { ServerConfig } from '../../src/main/types';
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
 
 const baseConfig: ServerConfig = {
   id: 'test-1',
@@ -84,5 +85,36 @@ describe('ChildManager', () => {
     const cm = new ChildManager(baseConfig, logPath);
     // Should not throw when stopping a non-started process
     await expect(cm.stop()).resolves.toBeUndefined();
+  });
+
+  it('resolves command wrappers from PATH', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-claw-command-'));
+    const ext = process.platform === 'win32' ? '.cmd' : '';
+    const executable = path.join(dir, `npx${ext}`);
+    fs.writeFileSync(executable, '');
+
+    const resolved = resolveCommand('npx', {
+      Path: dir,
+      PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    });
+
+    expect(resolved).toBe(executable);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps command scripts in non-shell mode for cross-spawn', () => {
+    const command = process.platform === 'win32' ? 'C:\\node\\npx.cmd' : '/usr/bin/npx';
+    const spec = createSpawnSpec(command, ['--version']);
+
+    if (process.platform === 'win32') {
+      expect(spec.command).toBe(command);
+      expect(spec.args).toEqual(['--version']);
+      expect(spec.shell).toBe(false);
+      expect(spec.displayCommand).toContain('npx.cmd');
+    } else {
+      expect(spec.command).toBe(command);
+      expect(spec.args).toEqual(['--version']);
+      expect(spec.shell).toBe(false);
+    }
   });
 });

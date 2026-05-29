@@ -75,6 +75,7 @@ class MockChildManager extends EventEmitter {
   getState() { return { ...this.state }; }
   isEnabled() { return this.state.enabled; }
   async getTools() { return this.tools; }
+  getCachedTools() { return this.tools; }
 
   async callTool(name: string, args: Record<string, unknown>) {
     return { content: [{ type: 'text', text: `called ${name}` }] };
@@ -143,6 +144,7 @@ describe('ProxyServer', () => {
     authenticate();
     const tools = await proxy.getTools();
     expect(tools.map(t => t.name).sort()).toEqual([
+      'mcp_claw__call_tool',
       'mcp_claw__get_server_status',
       'mcp_claw__list_servers',
       'mcp_claw__list_tools',
@@ -170,6 +172,7 @@ describe('ProxyServer', () => {
     expect(names).toEqual([
       'filesystem__read_file',
       'github__create_issue',
+      'mcp_claw__call_tool',
       'mcp_claw__get_server_status',
       'mcp_claw__list_servers',
       'mcp_claw__list_tools',
@@ -232,6 +235,7 @@ describe('ProxyServer', () => {
     proxy.invalidateCache();
     const tools = await proxy.getTools();
     expect(tools.map(t => t.name).sort()).toEqual([
+      'mcp_claw__call_tool',
       'mcp_claw__get_server_status',
       'mcp_claw__list_servers',
       'mcp_claw__list_tools',
@@ -291,9 +295,36 @@ describe('ProxyServer', () => {
         server: 'github',
         tool: 'create_issue',
         exposedName: 'github__create_issue',
+        callViaGateway: {
+          tool: 'mcp_claw__call_tool',
+          arguments: {
+            server: 'github',
+            tool: 'create_issue',
+            arguments: {},
+          },
+        },
         description: 'Create issue',
+        inputSchema: {},
       },
     ]);
+  });
+
+  it('gateway call_tool invokes tool by server and original tool name', async () => {
+    authenticate();
+    const cm = new MockChildManager('1', 'github', [
+      { name: 'create_issue', description: 'Create issue', inputSchema: {} },
+    ]);
+    const callTool = vi.spyOn(cm, 'callTool');
+    proxy.registerChildManager(cm as unknown as ChildManager);
+
+    const result = await (proxy as any).callGatewayTool('call_tool', {
+      server: 'github',
+      tool: 'create_issue',
+      arguments: { title: 'Bug' },
+    });
+
+    expect(callTool).toHaveBeenCalledWith('create_issue', { title: 'Bug' });
+    expect(result.content[0].text).toBe('called create_issue');
   });
 
   it('gateway search finds visible servers and tools', async () => {

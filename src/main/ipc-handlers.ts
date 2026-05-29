@@ -358,7 +358,7 @@ export function registerIpcHandlers(
       return { tools: [], error: 'Server not found' };
     }
     try {
-      const tools = await cm.getTools();
+      const tools = cm.getCachedTools();
       return { tools };
     } catch (err: any) {
       return { tools: [], error: err.message };

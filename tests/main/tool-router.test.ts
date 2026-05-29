@@ -30,6 +30,18 @@ describe('ToolRouter', () => {
       expect(result).toHaveLength(2);
       expect(result[0].name).toBe('github__create_issue');
       expect(result[1].name).toBe('filesystem__read_file');
+      expect(result[0]).toMatchObject({
+        title: 'github / create_issue',
+        description: 'MCP service "github", original tool "create_issue". Create an issue',
+        annotations: {
+          mcpClaw: {
+            serverId: '1',
+            serverName: 'github',
+            originalName: 'create_issue',
+            exposedName: 'github__create_issue',
+          },
+        },
+      });
     });
 
     it('returns empty array for zero clients', () => {

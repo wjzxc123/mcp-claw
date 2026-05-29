@@ -12,12 +12,147 @@ interface EnvEntry {
   value: string;
 }
 
+type FormTransport = 'stdio' | 'streamable-http';
 type ConfigMode = 'form' | 'json';
+
+interface ParsedJsonDraft {
+  name?: string;
+  description?: string;
+  transport: FormTransport;
+  autoStart: boolean;
+  config: {
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    cwd?: string | null;
+    url?: string;
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(item => item !== null && item !== undefined)
+    .map(item => String(item));
+}
+
+function normalizeEnv(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key, val]) => key.trim() && val !== null && val !== undefined)
+      .map(([key, val]) => [key.trim(), String(val)])
+  );
+}
+
+function normalizeCwd(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function inferTransport(raw: Record<string, unknown>, config: Record<string, unknown>): FormTransport | null {
+  const declared = String(raw.transport || raw.type || '').toLowerCase();
+  if (declared === 'stdio') return 'stdio';
+  if (declared === 'streamable-http' || declared === 'http' || declared === 'streamable_http') {
+    return 'streamable-http';
+  }
+  if (typeof config.command === 'string') return 'stdio';
+  if (typeof config.url === 'string') return 'streamable-http';
+  return null;
+}
+
+function inferNameFromStdioConfig(config: Record<string, unknown>): string | undefined {
+  const args = normalizeStringArray(config.args).map(arg => arg.trim()).filter(Boolean);
+  const packageArg = [...args].reverse().find(arg => !arg.startsWith('-'));
+  if (packageArg) return packageArg;
+
+  if (typeof config.command === 'string' && config.command.trim()) {
+    const parts = config.command.trim().split(/[\\/]/);
+    return parts[parts.length - 1].replace(/\.(cmd|exe|ps1)$/i, '') || undefined;
+  }
+  return undefined;
+}
+
+function normalizeServerDraft(raw: Record<string, unknown>, fallbackName?: string): ParsedJsonDraft {
+  const config = isRecord(raw.config) ? raw.config : raw;
+  const transport = inferTransport(raw, config);
+  if (!transport) {
+    throw new Error('无法识别 MCP 服务配置，请提供 command 或 url');
+  }
+
+  const nameFromConfig = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : undefined;
+  const description = typeof raw.description === 'string' ? raw.description : undefined;
+  const autoStart = typeof raw.autoStart === 'boolean' ? raw.autoStart : true;
+
+  if (transport === 'stdio') {
+    const command = typeof config.command === 'string' ? config.command.trim() : '';
+    if (!command) {
+      throw new Error('stdio 模式下 command 不能为空');
+    }
+
+    return {
+      name: nameFromConfig || fallbackName || inferNameFromStdioConfig(config),
+      description,
+      transport,
+      autoStart,
+      config: {
+        command,
+        args: normalizeStringArray(config.args),
+        env: normalizeEnv(config.env),
+        cwd: normalizeCwd(config.cwd),
+      },
+    };
+  }
+
+  const url = typeof config.url === 'string' ? config.url.trim() : '';
+  if (!url) {
+    throw new Error('streamable-http 模式下 url 不能为空');
+  }
+
+  return {
+    name: nameFromConfig || fallbackName,
+    description,
+    transport,
+    autoStart,
+    config: { url },
+  };
+}
+
+function parseJsonServerConfig(jsonConfig: string): ParsedJsonDraft {
+  if (!jsonConfig.trim()) {
+    throw new Error('JSON 配置不能为空');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonConfig);
+  } catch (e: any) {
+    throw new Error(`JSON 解析失败: ${e.message}`);
+  }
+
+  if (!isRecord(parsed)) {
+    throw new Error('JSON 配置必须是对象');
+  }
+
+  if (isRecord(parsed.mcpServers)) {
+    const servers = Object.entries(parsed.mcpServers).filter(([, value]) => isRecord(value));
+    if (servers.length === 0) {
+      throw new Error('mcpServers 中没有可用的服务配置');
+    }
+    const [serverName, serverConfig] = servers[0] as [string, Record<string, unknown>];
+    return normalizeServerDraft(serverConfig, serverName);
+  }
+
+  return normalizeServerDraft(parsed);
+}
 
 export function AddServerForm({ editingId, onDone, onCancel }: Props): React.ReactElement {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [transport, setTransport] = useState<'stdio' | 'streamable-http'>('stdio');
+  const [transport, setTransport] = useState<FormTransport>('stdio');
   const [command, setCommand] = useState('npx');
   const [argEntries, setArgEntries] = useState<string[]>(['-y']);
   const [httpUrl, setHttpUrl] = useState('');
@@ -108,56 +243,62 @@ export function AddServerForm({ editingId, onDone, onCancel }: Props): React.Rea
   };
 
   const buildInputFromJson = (): AddServerInput | null => {
-    if (!name.trim()) {
+    let parsed: ParsedJsonDraft;
+    try {
+      parsed = parseJsonServerConfig(jsonConfig);
+    } catch (e: any) {
+      setError(e.message);
+      return null;
+    }
+
+    const inputName = (name || parsed.name || '').trim();
+    if (!inputName) {
       setError('服务名称不能为空');
       return null;
     }
-    if (name.includes('__')) {
+    if (inputName.includes('__')) {
       setError('服务名称不能包含 "__"');
       return null;
     }
 
-    let parsed: any;
-    try {
-      parsed = JSON.parse(jsonConfig);
-    } catch (e: any) {
-      setError(`JSON 解析失败: ${e.message}`);
-      return null;
-    }
-
-    if (!parsed.transport) {
-      setError('JSON 中缺少 transport 字段');
-      return null;
-    }
-    if (parsed.transport !== 'stdio' && parsed.transport !== 'streamable-http') {
-      setError('transport 必须是 "stdio" 或 "streamable-http"');
-      return null;
-    }
-    if (!parsed.config || typeof parsed.config !== 'object') {
-      setError('JSON 中缺少 config 字段');
-      return null;
-    }
-
-    if (parsed.transport === 'stdio') {
-      if (!parsed.config.command) {
-        setError('stdio 模式下 config.command 不能为空');
-        return null;
-      }
-    } else if (parsed.transport === 'streamable-http') {
-      if (!parsed.config.url) {
-        setError('streamable-http 模式下 config.url 不能为空');
-        return null;
-      }
-    }
-
     return {
-      name: name.trim(),
-      description: description.trim(),
+      name: inputName,
+      description: (description || parsed.description || '').trim(),
       transport: parsed.transport,
       enabled: true,
-      autoStart: parsed.autoStart !== false,
+      autoStart: parsed.autoStart,
       config: parsed.config,
     };
+  };
+
+  const applyJsonDraft = (draft: ParsedJsonDraft) => {
+    if (!isEditing && draft.name) {
+      setName(draft.name);
+    }
+    if (draft.description !== undefined) {
+      setDescription(draft.description);
+    }
+    setTransport(draft.transport);
+    setAutoStart(draft.autoStart);
+
+    if (draft.transport === 'stdio') {
+      setCommand(draft.config.command || '');
+      setArgEntries(draft.config.args && draft.config.args.length > 0 ? draft.config.args : ['']);
+      setEnvEntries(Object.entries(draft.config.env || {}).map(([key, value]) => ({ key, value })));
+    } else {
+      setHttpUrl(draft.config.url || '');
+    }
+  };
+
+  const handleJsonConfigChange = (value: string) => {
+    setJsonConfig(value);
+    try {
+      const draft = parseJsonServerConfig(value);
+      applyJsonDraft(draft);
+      if (error) setError(null);
+    } catch {
+      // Keep typing/pasting quiet; submit still reports the concrete parse error.
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -308,12 +449,12 @@ export function AddServerForm({ editingId, onDone, onCancel }: Props): React.Rea
               id="json-config"
               className="json-textarea"
               value={jsonConfig}
-              onChange={e => setJsonConfig(e.target.value)}
+              onChange={e => handleJsonConfigChange(e.target.value)}
               rows={14}
               spellCheck={false}
             />
             <span className="form-hint">
-              粘贴完整的 MCP 服务器配置。需包含 transport 和 config 字段。
+              支持 MCP Claw JSON、Claude/Codex 的 mcpServers JSON，粘贴后会自动解析到表单字段。
               {transport === 'stdio' ? ' stdio 模式需 config.command。' : ' streamable-http 模式需 config.url。'}
             </span>
           </div>

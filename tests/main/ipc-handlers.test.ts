@@ -59,6 +59,10 @@ class MockChildManager extends EventEmitter {
     if (this.toolsError) throw this.toolsError;
     return this.tools;
   }
+
+  getCachedTools() {
+    return this.tools;
+  }
 }
 
 describe('IPC Handlers', () => {

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="MCP Claw logo" width="180">
+</p>
+
 # MCP Claw
 
 MCP Claw 是一个桌面端 MCP 聚合网关，用来统一管理多个 MCP Server，并通过一个本地 Streamable HTTP Endpoint 暴露给 Claude Code、Codex 等 MCP Client。

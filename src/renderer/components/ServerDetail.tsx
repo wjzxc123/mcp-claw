@@ -18,6 +18,7 @@ export function ServerDetail({ serverId, onBack, onEdit, onRefresh }: Props): Re
   const [testing, setTesting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [toolSearch, setToolSearch] = useState('');
 
   const loadServer = useCallback(async () => {
     try {
@@ -174,6 +175,13 @@ export function ServerDetail({ serverId, onBack, onEdit, onRefresh }: Props): Re
     t === 'streamable-http' ? 'streamable-http (HTTP 远程)' : 'stdio (命令行)';
 
   const cmdStr = server.configLabel || '-';
+  const normalizedToolSearch = toolSearch.trim().toLowerCase();
+  const visibleTools = normalizedToolSearch
+    ? tools.filter(tool =>
+        tool.name.toLowerCase().includes(normalizedToolSearch) ||
+        (tool.description || '').toLowerCase().includes(normalizedToolSearch)
+      )
+    : tools;
 
   return (
     <div className="page-container">
@@ -241,16 +249,35 @@ export function ServerDetail({ serverId, onBack, onEdit, onRefresh }: Props): Re
       <div className="section-header">
         <h3>工具列表 ({tools.length})</h3>
       </div>
+      {tools.length > 0 && (
+        <div className="tool-toolbar">
+          <input
+            type="search"
+            className="tool-search-input"
+            placeholder="搜索工具..."
+            value={toolSearch}
+            onChange={e => setToolSearch(e.target.value)}
+          />
+          <span className="tool-count">
+            {visibleTools.length === tools.length ? `${tools.length} 个工具` : `${visibleTools.length} / ${tools.length}`}
+          </span>
+        </div>
+      )}
       {toolsLoading ? (
         <p className="form-hint">加载中...</p>
       ) : tools.length === 0 ? (
         <p className="form-hint">该服务器没有暴露任何工具</p>
+      ) : visibleTools.length === 0 ? (
+        <div className="tool-list-empty">没有匹配的工具</div>
       ) : (
         <div className="tool-list">
-          {tools.map((tool, i) => (
+          {visibleTools.map((tool, i) => (
             <div key={i} className="tool-item">
-              <div className="tool-item-name">{tool.name}</div>
-              {tool.description && <div className="tool-item-desc">{tool.description}</div>}
+              <div className="tool-item-main">
+                <div className="tool-item-name" title={tool.name}>{tool.name}</div>
+                {tool.description && <div className="tool-item-desc" title={tool.description}>{tool.description}</div>}
+              </div>
+              <span className="tool-item-index">{i + 1}</span>
             </div>
           ))}
         </div>
